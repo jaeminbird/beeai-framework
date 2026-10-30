@@ -45,6 +45,25 @@ def check_model(model: T) -> None:
     schema_validator.validate_python(model.__dict__)
 
 
+def _break_ref_cycles(node: Any, ancestors: tuple[int, ...] = ()) -> Any:
+    """Copy an inlined schema, cutting the cycles a recursive $ref leaves behind.
+
+    Inlining "#/$defs/Node" inside Node itself makes the schema contain itself, which the code below would walk
+    forever. Where a definition reappears inside itself, it is replaced by a schema of the same type without
+    nested constraints (e.g. a tree node's children are accepted as any objects).
+    """
+    if isinstance(node, dict):
+        if id(node) in ancestors:
+            if node.get("type") == "object":
+                return {"type": "object", "additionalProperties": True}
+            return {"type": node["type"]} if isinstance(node.get("type"), str) else {}
+        ancestors = (*ancestors, id(node))
+        return {key: _break_ref_cycles(value, ancestors) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_break_ref_cycles(value, ancestors) for value in node]
+    return node
+
+
 class JSONSchemaModel(ABC, BaseModel):
     _custom_json_schema: JsonSchemaValue
 
@@ -71,7 +90,7 @@ class JSONSchemaModel(ABC, BaseModel):
     def create(cls, schema_name: str, schema: dict[str, Any]) -> type["JSONSchemaModel"]:
         from beeai_framework.backend.utils import inline_schema_refs
 
-        schema = inline_schema_refs(copy.deepcopy(schema))
+        schema = _break_ref_cycles(inline_schema_refs(copy.deepcopy(schema)))
         simplify_json_schema(schema)
 
         type_mapping: dict[str, Any] = {

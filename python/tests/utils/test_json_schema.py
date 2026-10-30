@@ -1,6 +1,7 @@
 # Copyright 2025 © BeeAI a Series of LF Projects, LLC
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import NoneType
 from typing import Any, Literal, get_args
 
@@ -434,3 +435,31 @@ def test_type_list_is_a_union_of_types() -> None:
     assert model(title=None, id="x", tags=None).model_dump() == {"title": None, "id": "x", "tags": None}
     with pytest.raises(ValidationError):
         model(title=["Dr."], id=5)
+
+
+@pytest.mark.unit
+def test_recursive_ref_is_cut_instead_of_recursing_forever() -> None:
+    # Pydantic's schema for `class Node(BaseModel): name: str; children: list["Node"]`, as FastMCP sends it.
+    schema = {
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}, "default": []},
+                },
+                "required": ["name"],
+            }
+        },
+        "type": "object",
+        "properties": {"tree": {"$ref": "#/$defs/Node"}},
+        "required": ["tree"],
+    }
+
+    model = JSONSchemaModel.create("count_nodes", schema)
+
+    tree = {"name": "a", "children": [{"name": "b", "children": [{"name": "c", "children": []}]}]}
+    assert model.model_validate({"tree": tree}).model_dump() == {"tree": tree}
+    with pytest.raises(ValidationError):
+        model.model_validate({"tree": {"children": []}})
+    assert "children" in json.dumps(model.model_json_schema())
