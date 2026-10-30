@@ -7,9 +7,27 @@ from dataclasses import dataclass
 
 from typing_extensions import TypedDict
 
-from beeai_framework.backend.message import AnyMessage
+from beeai_framework.backend.message import AnyMessage, AssistantMessage, ToolMessage
 from beeai_framework.memory.base_memory import BaseMemory
 from beeai_framework.memory.errors import ResourceError
+
+
+def _tool_exchange(messages: list[AnyMessage], index: int) -> slice:
+    """Return the span of the tool exchange the message at index belongs to (itself if none).
+
+    An exchange is an assistant message with tool calls followed by the tool messages that answer it. Chat APIs
+    (OpenAI, Anthropic) reject a tool result without its call, so the window evicts an exchange as a whole.
+    """
+    start = index
+    while start > 0 and isinstance(messages[start], ToolMessage):
+        start -= 1
+    first = messages[start]
+    if not (isinstance(first, AssistantMessage) and first.get_tool_calls()):
+        return slice(index, index + 1)
+    end = start + 1
+    while end < len(messages) and isinstance(messages[end], ToolMessage):
+        end += 1
+    return slice(start, end) if start <= index < end else slice(index, index + 1)
 
 
 class SlidingMemoryHandlers(TypedDict, total=False):
@@ -86,16 +104,21 @@ class SlidingMemory(BaseMemory):
             if not isinstance(to_remove, list):
                 to_remove = [to_remove]
 
-            # Remove selected messages
+            # Remove selected messages, each with the rest of its tool exchange
+            removed: list[AnyMessage] = []
             for msg in to_remove:
+                if any(msg is r for r in removed):
+                    continue
                 try:
                     msg_index = self._messages.index(msg)
-                    self._messages.pop(msg_index)
                 except ValueError:
                     raise ResourceError(
                         "Cannot delete non existing message.",
                         # context={"message": msg, "messages": self._messages},
                     ) from ValueError
+                span = _tool_exchange(self._messages, msg_index)
+                removed.extend(self._messages[span])
+                del self._messages[span]
 
             # Check if we still have overflow
             if self._is_overflow():
