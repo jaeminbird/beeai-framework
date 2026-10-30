@@ -4,7 +4,7 @@
  */
 
 import { TokenMemory } from "@/memory/tokenMemory.js";
-import { Message, UserMessage } from "@/backend/message.js";
+import { AssistantMessage, Message, ToolMessage, UserMessage } from "@/backend/message.js";
 import { verifyDeserialization } from "@tests/e2e/utils.js";
 import { sum } from "remeda";
 
@@ -178,6 +178,46 @@ describe("Token Memory", () => {
 
   it("Rejects a capacityThreshold above 1", () => {
     expect(() => new TokenMemory({ capacityThreshold: 1.5 })).toThrowError(TypeError);
+  });
+
+  const toolExchange = (id: string, result: string) => [
+    new AssistantMessage({
+      type: "tool-call",
+      toolCallId: id,
+      toolName: "fetch",
+      input: { url: "https://example.com" },
+    }),
+    new ToolMessage({
+      type: "tool-result",
+      toolCallId: id,
+      toolName: "fetch",
+      output: { type: "text", value: result },
+    }),
+  ];
+
+  it("Counts tool calls and results against the budget", async () => {
+    const instance = new TokenMemory({ maxTokens: 2000 });
+    for (let i = 0; i < 5; i++) {
+      await instance.addMany([
+        new UserMessage(`fetch page ${i}`),
+        ...toolExchange(`call_${i}`, "x".repeat(4000)),
+      ]);
+    }
+
+    // Each result is ~1000 tokens, so the 1500-token capacity holds one exchange, not all five.
+    expect(instance.tokensUsed).toBeLessThanOrEqual(2000 * 0.75);
+    expect(instance.messages.filter((msg) => msg instanceof ToolMessage)).toHaveLength(1);
+  });
+
+  it("Evicts a tool call together with its result", async () => {
+    const instance = new TokenMemory({ maxTokens: 200 });
+    await instance.addMany(toolExchange("call_1", "x".repeat(200)));
+
+    // Evicting the call alone (~11 tokens) would make room, but the result must not stay behind without it.
+    const question = new UserMessage("y".repeat(340));
+    await instance.add(question);
+
+    expect(instance.messages).toEqual([question]);
   });
 
   it("Serializes", async () => {

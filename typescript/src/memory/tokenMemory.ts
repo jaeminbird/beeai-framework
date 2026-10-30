@@ -8,7 +8,7 @@ import { shallowCopy } from "@/serializer/utils.js";
 import { removeFromArray } from "@/internals/helpers/array.js";
 import { map, sum } from "remeda";
 import { ensureRange } from "@/internals/helpers/number.js";
-import { Message } from "@/backend/message.js";
+import { AssistantMessage, Message, ToolMessage } from "@/backend/message.js";
 
 export interface Handlers {
   estimate: (messages: Message) => number;
@@ -16,7 +16,50 @@ export interface Handlers {
   removalSelector: (messages: Message[]) => Message;
 }
 
-const simpleEstimate: Handlers["estimate"] = (msg: Message) => Math.ceil(msg.text.length / 4);
+// The text a message puts into the prompt. `msg.text` leaves out tool calls and tool results.
+function promptText(msg: Message): string {
+  if (msg instanceof AssistantMessage) {
+    return (
+      msg.text +
+      msg
+        .getToolCalls()
+        .map((call) => `${call.toolName}${JSON.stringify(call.input) ?? ""}`)
+        .join("")
+    );
+  }
+  if (msg instanceof ToolMessage) {
+    return (
+      msg.text +
+      msg
+        .getToolResults()
+        .map((result) => JSON.stringify(result.output) ?? "")
+        .join("")
+    );
+  }
+  return msg.text;
+}
+
+// The span of the tool exchange the message at `index` belongs to (the message alone if none): an assistant
+// message with tool calls and the tool messages that answer it. Chat APIs (OpenAI, Anthropic) reject a tool result
+// without its call, so the memory evicts an exchange as a whole.
+function toolExchange(messages: Message[], index: number): [number, number] {
+  let start = index;
+  while (start > 0 && messages[start] instanceof ToolMessage) {
+    start--;
+  }
+  const first = messages[start];
+  if (!(first instanceof AssistantMessage && first.getToolCalls().length > 0)) {
+    return [index, index + 1];
+  }
+  let end = start + 1;
+  while (end < messages.length && messages[end] instanceof ToolMessage) {
+    end++;
+  }
+  return index < end ? [start, end] : [index, index + 1];
+}
+
+const simpleEstimate: Handlers["estimate"] = (msg: Message) =>
+  Math.ceil(promptText(msg).length / 4);
 const simpleTokenize: Handlers["tokenize"] = async (msgs: Message[]) =>
   sum(map(msgs, simpleEstimate)); // TODO
 
@@ -54,7 +97,8 @@ export class TokenMemory extends BaseMemory {
     this.handlers = {
       ...config?.handlers,
       estimate:
-        config?.handlers?.estimate || ((msg) => Math.ceil((msg.role.length + msg.text.length) / 4)),
+        config?.handlers?.estimate ||
+        ((msg) => Math.ceil((msg.role.length + promptText(msg).length) / 4)),
       tokenize: config?.handlers?.tokenize || simpleTokenize,
       removalSelector: config.handlers?.removalSelector || ((messages) => messages[0]),
     };
@@ -101,7 +145,7 @@ export class TokenMemory extends BaseMemory {
       const capacity = this.maxTokens * this.threshold;
       while (this.messages.length > 0 && this.tokensUsed > capacity - meta.tokensCount) {
         const messageToDelete = this.handlers.removalSelector(this.messages);
-        const exists = await this.delete(messageToDelete);
+        const exists = messageToDelete ? await this.evict(messageToDelete) : false;
 
         if (!messageToDelete || !exists) {
           throw new MemoryFatalError('The "removalSelector" handler must return a valid message!');
@@ -120,6 +164,19 @@ export class TokenMemory extends BaseMemory {
       this.restoreState(state);
       throw error;
     }
+  }
+
+  // Deletes a message chosen by the removalSelector together with the rest of its tool exchange.
+  protected async evict(message: Message): Promise<boolean> {
+    const index = this.messages.indexOf(message);
+    if (index === -1) {
+      return false;
+    }
+    const [start, end] = toolExchange(this.messages, index);
+    for (const msg of this.messages.slice(start, end)) {
+      await this.delete(msg);
+    }
+    return true;
   }
 
   async delete(message: Message) {
