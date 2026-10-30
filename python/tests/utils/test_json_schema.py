@@ -434,3 +434,29 @@ def test_type_list_is_a_union_of_types() -> None:
     assert model(title=None, id="x", tags=None).model_dump() == {"title": None, "id": "x", "tags": None}
     with pytest.raises(ValidationError):
         model(title=["Dr."], id=5)
+
+
+@pytest.mark.unit
+def test_property_names_pydantic_reserves_are_aliased() -> None:
+    # Search and document-store tools often take "_id" or "_source"; Pydantic rejects such field names.
+    model = JSONSchemaModel.create(
+        "get_document",
+        {
+            "type": "object",
+            "properties": {
+                "_id": {"type": "string"},
+                "field_id": {"type": "string"},
+                "model_config": {"type": "string"},
+                "query": {"type": "object", "properties": {"_op": {"type": "string"}}, "required": ["_op"]},
+            },
+            "required": ["_id"],
+        },
+    )
+
+    data = {"_id": "doc-1", "field_id": "other", "model_config": "c", "query": {"_op": "eq"}}
+    instance = model.model_validate(data)
+    assert instance.model_dump() == data
+    assert model.model_validate({"_id": "doc-2"}).model_dump(exclude_unset=True) == {"_id": "doc-2"}
+    assert "_id" in model.model_json_schema()["properties"]
+    with pytest.raises(ValidationError):
+        model.model_validate({})
