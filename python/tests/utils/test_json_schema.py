@@ -450,3 +450,26 @@ def test_type_list_is_a_union_of_types() -> None:
     assert model(title=None, id="x", tags=None).model_dump() == {"title": None, "id": "x", "tags": None}
     with pytest.raises(ValidationError):
         model(title=["Dr."], id=5)
+
+
+@pytest.mark.unit
+def test_type_list_applies_each_keyword_to_its_own_types() -> None:
+    model = JSONSchemaModel.create(
+        "scoped_keywords",
+        {
+            "type": "object",
+            "properties": {
+                "id": {"type": ["string", "integer"], "minimum": 1, "pattern": "^[a-z]+$"},
+                "count": {"type": ["integer", "null"], "minimum": 0},
+            },
+            "required": ["id"],
+        },
+    )
+
+    assert model(id="abc").model_dump() == {"id": "abc", "count": None}
+    assert model(id=5, count=0).model_dump() == {"id": 5, "count": 0}
+    for bad in ("ABC", 0):
+        with pytest.raises(ValidationError):
+            model(id=bad)
+    with pytest.raises(ValidationError):
+        model(id="abc", count=-1)
